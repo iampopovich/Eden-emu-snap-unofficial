@@ -1,0 +1,105 @@
+name: Build and publish snap
+
+on:
+  schedule:
+    # Every 12 hours - Eden ships stable releases every few weeks
+    - cron: '0 */12 * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - snapcraft.yaml
+      - other-files/**
+      - snap/**
+      - .github/workflows/build-and-publish.yml
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+      upstream_version: ${{ steps.check.outputs.upstream_version }}
+    steps:
+      - name: Compare upstream Eden release with published snap
+        id: check
+        run: |
+          set -euo pipefail
+          # Eden lives on its own Forgejo, not GitHub. Newest non-draft, non-prerelease release.
+          UPSTREAM_TAG=$(curl -fsSL "https://git.eden-emu.dev/api/v1/repos/eden-emu/eden/releases?limit=20" | \
+            jq -r '[.[] | select(.draft == false and .prerelease == false)][0].tag_name')
+          UPSTREAM_VERSION=${UPSTREAM_TAG#v}
+          echo "Upstream version: $UPSTREAM_VERSION"
+          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "null" ]; then
+            echo "::error::Could not read upstream version"
+            exit 1
+          fi
+
+          # Version currently published to the stable channel of our snap (empty if none yet)
+          PUBLISHED_VERSION=$(curl -s "https://api.snapcraft.io/v2/snaps/info/eden-fresh" \
+            -H "Snap-Device-Series: 16" | \
+            jq -r '[."channel-map"[]? | select(.channel.name == "stable")][0].version // ""' || true)
+          echo "Published version: $PUBLISHED_VERSION"
+
+          if [ "$UPSTREAM_VERSION" != "$PUBLISHED_VERSION" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
+            echo "new_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_version=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_version == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    # snapcraft builds only for the runner's own arch (build-on == build-for),
+    # so each arch needs a native runner.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build snap (${{ matrix.arch }})
+        uses: snapcore/action-build@v1
+        id: build
+        with:
+          path: .
+
+      - name: Smoke test the built snap
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+          unsquashfs -q -d prime "${{ steps.build.outputs.snap }}"
+          test -x prime/opt/eden/AppRun
+          test -f prime/opt/eden/bin/vulkan-check.hook
+          grep -E '^version:' prime/meta/snap.yaml
+          OUT=$(timeout 30 prime/opt/eden/bin/eden-cli --version)
+          echo "$OUT"
+          echo "$OUT" | grep -q "v${{ needs.check-upstream.outputs.upstream_version }}"
+
+      - name: Publish to edge first
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: edge
+
+  promote-to-stable:
+    needs: [check-upstream, build-and-publish]
+    if: needs.check-upstream.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Promote edge to stable
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          snapcraft promote eden-fresh --from-channel=edge --to-channel=stable --yes

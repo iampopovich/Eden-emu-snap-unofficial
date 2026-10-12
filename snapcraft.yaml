@@ -1,6 +1,7 @@
-name: eden-emulator
+name: eden-fresh
+title: Eden Fresh
 base: core24
-version: '0.2.0-rc2'
+adopt-info: eden-app
 platforms:
   amd64:
     build-on: [amd64]
@@ -8,82 +9,111 @@ platforms:
   arm64:
     build-on: [arm64]
     build-for: [arm64]
-summary: Eden, Switch Emulator
+summary: Eden, Nintendo Switch emulator (latest stable release)
 description: |
-  An open-source Switch emulator, forked from the Yuzu emulator
+  Eden is an open-source Nintendo Switch emulator written in C++, derived from
+  yuzu and Sudachi.
+
+  This is an unofficial community snap. It repackages the official Linux
+  AppImage published by the Eden project (https://git.eden-emu.dev/eden-emu/eden)
+  and is rebuilt automatically whenever a new stable upstream release appears.
+
+  No firmware, keys or games are included. You must dump them from your own
+  console.
+
+  Nintendo Switch is a trademark of Nintendo. This application is not
+  affiliated with Nintendo in any way.
+license: GPL-3.0-or-later
+website: https://eden-emu.dev
+source-code: https://github.com/iampopovich/Snap-Eden-emulator
+issues: https://github.com/iampopovich/Snap-Eden-emulator/issues
 grade: stable
 confinement: strict
 compression: lzo
+icon: snap/gui/dev.eden_emu.eden.svg
 
 apps:
-  eden-emulator:
-    command-chain: [desktop-launch-eden]
-    command: usr/bin/eden
-    desktop: usr/share/applications/dev.eden_emu.eden.desktop
+  eden-fresh:
+    command-chain: [bin/desktop-launch-eden]
+    # Upstream AppRun: runs the sharun hooks (vulkan checks, X11 fallback) and
+    # then the bundled eden binary. Set I_WANT_A_BROKEN_WAYLAND_UI=1 for native
+    # Wayland, same as with the upstream AppImage.
+    command: opt/eden/AppRun
+    desktop: opt/eden/dev.eden_emu.eden.desktop
     common-id: dev.eden_emu.eden
-    environment:
-      QT_QPA_PLATFORMTHEME: xdgdesktopportal
-      LD_LIBRARY_PATH: $SNAP/lxqt-support/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR:$LD_LIBRARY_PATH
-      QT_PLUGIN_PATH: $SNAP/lxqt-support/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/qt6/plugins:$QT_PLUGIN_PATH
-    extensions: [kde-neon-6]
     plugs:
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - opengl
+      - audio-playback
+      - network
+      - network-bind
       - screen-inhibit-control
       - home
       - removable-media
       - mount-observe
       - system-observe
+      - hardware-observe
       - joystick
       - bluez
       - udisks2
+      - shared-memory
 
 plugs:
   shared-memory:
     private: true
 
 parts:
-  eden-emulator-app:
-    plugin: dump
-    source:
-      - on amd64: https://git.eden-emu.dev/eden-emu/eden/releases/download/v$SNAPCRAFT_PROJECT_VERSION/Eden-Ubuntu-24.04-v$SNAPCRAFT_PROJECT_VERSION-amd64.deb
-      - on arm64: https://git.eden-emu.dev/eden-emu/eden/releases/download/v$SNAPCRAFT_PROJECT_VERSION/Eden-Ubuntu-24.04-v$SNAPCRAFT_PROJECT_VERSION-aarch64.deb
-    override-build: |
-      craftctl default
-      sed -i 's|Name=Eden|Name=Eden [Kyu]|' $CRAFT_PART_INSTALL/usr/share/applications/dev.eden_emu.eden.desktop
-      sed -i 's|Icon=dev.eden_emu.eden|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/dev.eden_emu.eden.svg|' $CRAFT_PART_INSTALL/usr/share/applications/dev.eden_emu.eden.desktop
-      sed -i 's|StartupWMClass=eden|StartupWMClass=dev.eden_emu.eden|' $CRAFT_PART_INSTALL/usr/share/applications/dev.eden_emu.eden.desktop
-
-  dependencies:
-    after: [eden-emulator-app]
+  eden-app:
     plugin: nil
-    stage-packages:
-      - libsdl2-2.0-0
-      - libzydis4.0t64
-      - libcpp-httplib0.14t64
-      - libcubeb0
-      - libdiscord-rpc3
-      - libenet7
-      - libquazip1-qt6-1t64
-      - libsimpleini1t64
-      - libdecor-0-0
-      - libjack0
-      - libfmt9
-      - libboost-context1.83.0
-    prime:
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libSDL2-2.0.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libZydis.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libcpp-httplib.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libcubeb.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libdiscord-rpc.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libenet.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libquazip1-qt6.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libsimpleini.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libdecor-0.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libjack.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libfmt.so*
-      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libboost_context.so*
+    build-packages: [curl, jq]
+    override-build: |
+      set -eu
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64) TARGET=amd64 ;;
+        arm64) TARGET=aarch64 ;;
+        *) echo "Unsupported arch $CRAFT_ARCH_BUILD_FOR"; exit 1 ;;
+      esac
 
-  other-files:
-    after: [dependencies]
+      # Newest non-draft, non-prerelease release from the official Forgejo.
+      curl -fsSL "https://git.eden-emu.dev/api/v1/repos/eden-emu/eden/releases?limit=20" -o releases.json
+      TAG=$(jq -r '[.[] | select(.draft == false and .prerelease == false)][0].tag_name' releases.json)
+      URL=$(jq -r --arg tag "$TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url' releases.json \
+        | grep -E "/Eden-Linux-${TAG}-${TARGET}-clang-pgo\.AppImage$" | head -1 || true)
+      [ -n "$URL" ] || { echo "No ${TARGET} clang-pgo AppImage in ${TAG}"; exit 1; }
+      echo "Downloading $URL"
+      curl -fL "$URL" -o eden.AppImage
+      chmod +x eden.AppImage
+      rm -rf squashfs-root AppDir
+      ./eden.AppImage --appimage-extract > /dev/null
+      # uruntime (DwarFS) AppImages extract to AppDir/ and leave squashfs-root
+      # as a symlink to it; older runtimes extract to squashfs-root/.
+      if [ -d AppDir ]; then EXTRACTED=$(readlink -f AppDir); else EXTRACTED=$(readlink -f squashfs-root); fi
+      [ -x "$EXTRACTED/AppRun" ] || { echo "AppImage extraction failed"; exit 1; }
+
+      mkdir -p "$CRAFT_PART_INSTALL/opt"
+      rm -rf "$CRAFT_PART_INSTALL/opt/eden"
+      mv "$EXTRACTED" "$CRAFT_PART_INSTALL/opt/eden"
+
+      # No in-place AppImage self-updates inside a snap.
+      rm -f "$CRAFT_PART_INSTALL/opt/eden/bin/self-updater.hook"
+
+      DESKTOP="$CRAFT_PART_INSTALL/opt/eden/dev.eden_emu.eden.desktop"
+      sed -i \
+        -e 's|^Name=Eden$|Name=Eden Fresh|' \
+        -e 's|^Icon=.*|Icon=${SNAP}/opt/eden/dev.eden_emu.eden.svg|' \
+        -e '/^TryExec=/d' \
+        -e '/^X-AppImage-/d' \
+        "$DESKTOP"
+
+      craftctl set version="${TAG#v}"
+
+  launcher:
+    after: [eden-app]
     plugin: dump
     source: ./other-files
-    prime: [desktop-launch-eden]
+    organize:
+      desktop-launch-eden: bin/desktop-launch-eden
+    prime: [bin/desktop-launch-eden]
