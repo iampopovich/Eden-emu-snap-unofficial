@@ -2,8 +2,7 @@ name: Build and publish snap
 
 on:
   schedule:
-    # Every 12 hours - Eden ships stable releases every few weeks
-    - cron: '0 */12 * * *'
+    - cron: '0 9 * * *'
   workflow_dispatch: {}
   push:
     branches: [main]
